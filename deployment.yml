@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tmg-vso-appointment-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tmg-vso-appointment-app
+  template:
+    metadata:
+      labels:
+        app: tmg-vso-appointment-app
+    spec:
+      containers:
+        - name: tmg-vso-appointment-app
+          image: de.icr.io/cic-tmg-ecommerce/user-managment-backend-dev-app:638-k8-deployment-77980661-20210727153437
+          args:
+            - --spring.application.json=$(BINDING)
+          env:
+            - name: BINDING
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-properties
+                  key: application-properties
+            - name: DB_CONNECTION
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-properties
+                  key: DB_CONNECTION
+            - name: DB_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-properties
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: backend-properties
+                  key: DB_PASSWORD
+          ports:
+            - containerPort: 8025
+          resources:
+            requests:
+              cpu: 125m
+              memory: 350Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tmg-vso-appointment-service-cip
+  labels:
+    app: tmg-vso-appointment-app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8025
+  selector:
+    app: tmg-vso-appointment-app
