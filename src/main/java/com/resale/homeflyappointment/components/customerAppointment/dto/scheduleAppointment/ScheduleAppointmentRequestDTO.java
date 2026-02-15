@@ -5,7 +5,6 @@ import lombok.Data;
 @Data
 public class ScheduleAppointmentRequestDTO {
     private String schedule;
-    private String sapPartnerId;
     private Integer modelId;
     private Integer projectId;
 }

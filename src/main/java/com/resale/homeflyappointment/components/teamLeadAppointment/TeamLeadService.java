@@ -2,7 +2,6 @@ package com.resale.homeflyappointment.components.teamLeadAppointment;
 
 import com.resale.homeflyappointment.components.teamLeadAppointment.dto.AppointmentTeamLeadDTO;
 import com.resale.homeflyappointment.components.teamLeadAppointment.dto.CustomerBasicInfoDTO;
-import com.resale.homeflyappointment.components.userAppointment.dto.cancelAppointment.C4cCancelAppointmentDto;
 import com.resale.homeflyappointment.components.userAppointment.dto.rescheduleAppointment.UserRescheduleAppointmentRequestDTO;
 import com.resale.homeflyappointment.feign.CustomerMSFeignClient;
 import com.resale.homeflyappointment.feign.UserFeignClient;
@@ -29,6 +28,7 @@ public class TeamLeadService {
     private final UserFeignClient userFeignClient;
     private final JwtTokenUtil jwtTokenUtil;
     private final CustomerMSFeignClient customerMSFeignClient;
+
 
     public ReturnObject<List<AppointmentTeamLeadDTO>> getAppointmentsByUserId(
             Integer userId,
@@ -57,6 +57,7 @@ public class TeamLeadService {
         } else {
             appointments = appointmentRepository.findAllByUserIdAndStatus(Long.valueOf(userId), status);
         }
+
         if (appointments.isEmpty()) {
             return new ReturnObject<>("No appointments found", true, Collections.emptyList());
         }
@@ -93,22 +94,32 @@ public class TeamLeadService {
                         customerMap.get(a.getCustomerId())
                 ))
                 .toList();
+
         return new ReturnObject<>("Success", true, result);
     }
 
-    public ResponseEntity<?> rescheduleUserAppointmentByTeamLead(Integer userId,Integer salesmanId, UserRescheduleAppointmentRequestDTO req) {
+
+    public ResponseEntity<?> rescheduleUserAppointmentByTeamLead(
+            Integer userId,
+            Integer salesmanId,
+            UserRescheduleAppointmentRequestDTO req
+    ) {
 
         System.out.println("---- [Reschedule Appointment] START ----");
         System.out.println("Incoming userId: " + salesmanId);
         System.out.println("Incoming appId: " + req.getAppId());
         System.out.println("Incoming new schedule: " + req.getSchedule());
+
         ResponseEntity<ReturnObject> assignedResponse =
                 userFeignClient.isUserAssignedToTeamLead(userId, salesmanId);
 
         if (assignedResponse.getBody() == null
                 || Boolean.FALSE.equals(assignedResponse.getBody().getStatus())) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ReturnObject<>("User not assigned to this team lead", false, null));
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
+                    new ReturnObject<>("User not assigned to this team lead", false, null)
+            );
         }
+
         // ---------------------------------------------------------
         // 1️⃣ Fetch Existing Appointment
         // ---------------------------------------------------------
@@ -131,38 +142,9 @@ public class TeamLeadService {
         }
 
         Appointment oldAppointment = optAppointment.get();
-        String c4cId = oldAppointment.getC4CId();
 
         // ---------------------------------------------------------
-        // 2️⃣ Determine if SAP Call Should be Performed
-        // ---------------------------------------------------------
-        boolean shouldCallSap =
-                c4cId != null &&
-                        !c4cId.equalsIgnoreCase("FAIL") &&
-                        !c4cId.equalsIgnoreCase("SAP_EXCEPTION");
-
-        if (shouldCallSap) {
-            System.out.println("Calling SAP to cancel/modify existing appointment...");
-            try {
-                C4cCancelAppointmentDto dto = new C4cCancelAppointmentDto();
-                dto.setAppId(c4cId);
-                dto.setNote(req.getNote());
-                dto.setReasonCode(req.getReasonCode());
-
-                // TODO -> Replace with SAP reschedule call when implemented
-                // sapFeignClientC4c.userCancelAppointment(dto);
-
-                System.out.println("SAP reschedule/cancel completed successfully for C4CId: " + c4cId);
-
-            } catch (Exception ex) {
-                System.out.println("❌ SAP Reschedule Error for C4CId " + c4cId + " | " + ex.getMessage());
-            }
-        } else {
-            System.out.println("Skipping SAP call: C4CId not valid (" + c4cId + ")");
-        }
-
-        // ---------------------------------------------------------
-        // 3️⃣ Close Old Appointment (Always)
+        // 2️⃣ Close Old Appointment
         // ---------------------------------------------------------
         oldAppointment.setStatus("RESCHEDULED");
 
@@ -174,7 +156,7 @@ public class TeamLeadService {
         }
 
         // ---------------------------------------------------------
-        // 4️⃣ Create New Appointment (Always)
+        // 3️⃣ Create New Appointment
         // ---------------------------------------------------------
         Appointment newAppointment = new Appointment();
         newAppointment.setUserId(oldAppointment.getUserId());
@@ -188,12 +170,8 @@ public class TeamLeadService {
             System.out.println("⚠️ Invalid date in request: " + ex.getMessage());
         }
 
-        // C4CId is not known yet → Set fallback
-        //newAppointment.setC4CId("RESCHEDULE_PENDING");
-        newAppointment.setC4CId(oldAppointment.getC4CId());
-
         // ---------------------------------------------------------
-        // 5️⃣ Save New Appointment Locally (Always)
+        // 4️⃣ Save New Appointment Locally
         // ---------------------------------------------------------
         try {
             appointmentRepository.save(newAppointment);
@@ -206,7 +184,7 @@ public class TeamLeadService {
         }
 
         // ---------------------------------------------------------
-        // 6️⃣ Final Response
+        // 5️⃣ Final Response
         // ---------------------------------------------------------
         System.out.println("---- [Reschedule Appointment] END SUCCESS ----");
 
@@ -228,9 +206,9 @@ public class TeamLeadService {
 
         Appointment appointment = optionalAppointment.get();
 
-
         ResponseEntity<ReturnObject> assignedResponse =
                 userFeignClient.isUserAssignedToTeamLead(teamLeadId, appointment.getUserId());
+
         if (assignedResponse.getBody().getStatus().equals(false)) {
             return new ReturnObject<>("User not assigned to this team lead", false, null);
         }
@@ -244,4 +222,3 @@ public class TeamLeadService {
         }
     }
 }
-

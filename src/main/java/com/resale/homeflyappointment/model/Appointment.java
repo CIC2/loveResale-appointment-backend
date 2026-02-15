@@ -25,9 +25,6 @@ public class Appointment {
     @Column(name = "appointment_date")
     private Timestamp appointmentDate;
     @Basic
-    @Column(name = "c4c_id")
-    private String c4CId;
-    @Basic
     @Column(name = "status")
     private String status;
     @Basic

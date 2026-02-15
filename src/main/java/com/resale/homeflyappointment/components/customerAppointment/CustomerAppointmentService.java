@@ -3,14 +3,10 @@ package com.resale.homeflyappointment.components.customerAppointment;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.resale.homeflyappointment.components.customerAppointment.dto.*;
-import com.resale.homeflyappointment.components.customerAppointment.dto.availableSlots.AppointmentSlotsResponseDTO;
 import com.resale.homeflyappointment.components.customerAppointment.dto.reschedule.RescheduleAppointmentRequestDTO;
-import com.resale.homeflyappointment.components.customerAppointment.dto.reschedule.RescheduleAppointmentSapResponse;
 import com.resale.homeflyappointment.components.customerAppointment.dto.scheduleAppointment.ScheduleAppointmentRequestDTO;
-import com.resale.homeflyappointment.components.customerAppointment.dto.scheduleAppointment.ScheduleAppointmentSapResponse;
 import com.resale.homeflyappointment.components.teamLeadAppointment.dto.CustomerBasicInfoDTO;
 import com.resale.homeflyappointment.components.userAppointment.dto.UserProfileResponseDTO;
-import com.resale.homeflyappointment.components.userAppointment.dto.cancelAppointment.C4cCancelAppointmentDto;
 import com.resale.homeflyappointment.components.userAppointment.dto.cancelAppointment.CancelAppointmentDTO;
 import com.resale.homeflyappointment.feign.*;
 import com.resale.homeflyappointment.model.Appointment;
@@ -35,8 +31,6 @@ import java.util.concurrent.ThreadLocalRandom;
 @Slf4j
 public class CustomerAppointmentService {
 
-
-    private final SAPFeignClientC4c sapFeignClientC4c;
     private final CustomerFeignClient customerFeignClient;
     private final AppointmentRepository appointmentRepository;
     private final MessageUtil messageUtil;
@@ -46,14 +40,14 @@ public class CustomerAppointmentService {
     private final AppointmentOtpRepository appointmentOtpRepository;
     private final CustomerMSFeignClient customerMSFeignClient;
 
-    public CustomerAppointmentService(SAPFeignClientC4c sapFeignClientC4c,
-                                      CustomerFeignClient customerFeignClient,
+    public CustomerAppointmentService(CustomerFeignClient customerFeignClient,
                                       AppointmentRepository appointmentRepository,
                                       MessageUtil messageUtil,
                                       UserFeignClient userFeignClient,
-                                      CustomerValidationService customerValidationService, CommunicationFeignClient communicationFeignClient, AppointmentOtpRepository appointmentOtpRepository,
+                                      CustomerValidationService customerValidationService,
+                                      CommunicationFeignClient communicationFeignClient,
+                                      AppointmentOtpRepository appointmentOtpRepository,
                                       CustomerMSFeignClient customerMSFeignClient) {
-        this.sapFeignClientC4c = sapFeignClientC4c;
         this.customerFeignClient = customerFeignClient;
         this.appointmentRepository = appointmentRepository;
         this.messageUtil = messageUtil;
@@ -66,18 +60,17 @@ public class CustomerAppointmentService {
 
 
     public ResponseEntity<?> createAppointment(Long customerId, ScheduleAppointmentRequestDTO scheduleAppointmentRequestDTO) {
+
+        // 1️⃣ Validate customer
         ResponseEntity<ReturnObject<CustomerValidationResultDTO>> validationResponse =
                 customerFeignClient.validateCustomer(customerId);
 
-        // 2. run validation helper
         ReturnObject<CustomerValidationResultDTO> validationError =
                 customerValidationService.extractCustomerValidationError(validationResponse);
 
-        // 3. if error exists → return it
         if (validationError != null) {
             return ResponseEntity.badRequest().body(validationError);
         }
-
 
         if (scheduleAppointmentRequestDTO.getSchedule().isEmpty()) {
             ReturnObject error = new ReturnObject();
@@ -85,10 +78,11 @@ public class CustomerAppointmentService {
             error.setMessage("Need to Add Date for Appointment");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
         }
+
         try {
             System.out.println("customerId: " + customerId);
 
-            // 1️⃣ Fetch existing OPEN appointments
+            // 2️⃣ Check existing OPEN appointments
             Optional<List<Appointment>> customerAppointmentsOptional =
                     appointmentRepository.findAllByCustomerIdAndStatus(customerId, "OPEN");
 
@@ -104,32 +98,11 @@ public class CustomerAppointmentService {
 
             System.out.println("---- [Create Appointment] START ----" + customerId);
 
-            // 2️⃣ Fetch customer profile
-            ResponseEntity<ReturnObject<ProfileResponseDTO>> customerResponse =
-                    customerFeignClient.getCustomerProfile(customerId);
-
-            if (!customerResponse.getStatusCode().is2xxSuccessful()
-                    || customerResponse.getBody() == null
-                    || customerResponse.getBody().getData() == null) {
-                throw new RuntimeException("Failed to fetch customer info from Customer Service");
-            }
-
-            ProfileResponseDTO customerProfile = customerResponse.getBody().getData();
-            scheduleAppointmentRequestDTO.setSapPartnerId(customerProfile.getSapPartnerId());
-
-            if (scheduleAppointmentRequestDTO.getSapPartnerId() == null
-                    || scheduleAppointmentRequestDTO.getSapPartnerId().isEmpty()) {
-
-                ReturnObject error = new ReturnObject();
-                error.setStatus(false);
-                error.setMessage("No Assigned Business Partner");
-                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
-            }
-
             // 3️⃣ Assign Salesman using Round Robin API
             System.out.println("Calling Round Robin Salesman Assignment API...");
 
-            ResponseEntity<ReturnObject<?>> rrResponse = userFeignClient.getAssignSalesmanRoundRobin(scheduleAppointmentRequestDTO.getProjectId());
+            ResponseEntity<ReturnObject<?>> rrResponse =
+                    userFeignClient.getAssignSalesmanRoundRobin(scheduleAppointmentRequestDTO.getProjectId());
 
             if (!rrResponse.getStatusCode().is2xxSuccessful()
                     || rrResponse.getBody() == null
@@ -137,10 +110,7 @@ public class CustomerAppointmentService {
                 throw new RuntimeException("Failed to get Salesman from Round Robin API");
             }
 
-            Object data = rrResponse.getBody().getData();
-
-            Map<String, Object> salesmanMap = (Map<String, Object>) data;
-
+            Map<String, Object> salesmanMap = (Map<String, Object>) rrResponse.getBody().getData();
             Long assignedSalesmanId = Long.valueOf(salesmanMap.get("id").toString());
             System.out.println("Assigned Salesman ID: " + assignedSalesmanId);
 
@@ -149,41 +119,19 @@ public class CustomerAppointmentService {
             newApp.setCustomerId(customerId);
             newApp.setModelId(scheduleAppointmentRequestDTO.getModelId());
 
-            // Convert schedule datetime
             String rawDate = scheduleAppointmentRequestDTO.getSchedule();
             rawDate = rawDate.replaceAll("(\\+|\\-)(\\d{2})(\\d{2})$", "$1$2:$3");
             OffsetDateTime odt = OffsetDateTime.parse(rawDate);
-            Timestamp timestamp = Timestamp.from(odt.toInstant());
-            newApp.setAppointmentDate(timestamp);
+            newApp.setAppointmentDate(Timestamp.from(odt.toInstant()));
 
             newApp.setType("CUSTOMER SCHEDULE");
             newApp.setStatus("OPEN");
-            newApp.setUserId(assignedSalesmanId.intValue());  // 👈 Assigned salesman
+            newApp.setUserId(assignedSalesmanId.intValue());
 
-            // 5️⃣ Call SAP C4C to create appointment
-            try {
-                ResponseEntity<ScheduleAppointmentSapResponse> response =
-                        sapFeignClientC4c.customerScheduleAppointment(scheduleAppointmentRequestDTO);
-
-                ScheduleAppointmentSapResponse sapResponse = response.getBody();
-
-                if (response.getStatusCode().is2xxSuccessful() && sapResponse != null) {
-                    newApp.setC4CId(sapResponse.getAppointmentId());
-                    System.out.println("Appointment created in SAP ID: " + sapResponse.getAppointmentId());
-                } else {
-                    newApp.setC4CId("FAIL");
-                    System.out.println("⚠️ SAP appointment creation failed.");
-                }
-            } catch (Exception e) {
-                System.out.println("-Error in calling SAP (C4C)");
-                newApp.setC4CId("SAP_EXCEPTION");
-                System.out.println("⚠️ SAP appointment creation failed.");
-            }
-
-            // 6️⃣ Save to local DB
+            // 5️⃣ Save to local DB
             appointmentRepository.save(newApp);
 
-            // 7️⃣ Return object
+            // 6️⃣ Return response
             ReturnObject responseObj = new ReturnObject();
             responseObj.setStatus(true);
             responseObj.setData(newApp);
@@ -202,72 +150,16 @@ public class CustomerAppointmentService {
         }
     }
 
-    public ResponseEntity<ReturnObject<?>> findAvailableAppointments(Long customerId) {
-        try {
-            System.out.println("customerId: " + customerId);
-
-            // Fetch existing appointments
-            Optional<List<Appointment>> customerAppointmentsOptional =
-                    appointmentRepository.findAllByCustomerIdAndStatus(customerId, "OPEN");
-
-            if (customerAppointmentsOptional.isPresent()) {
-                List<Appointment> customerAppointments = customerAppointmentsOptional.get();
-
-                // If customer already has appointments, return them
-                if (!customerAppointments.isEmpty()) {
-                    return ResponseEntity.ok(
-                            new ReturnObject<>(
-                                    "Customer already has appointment(s)",
-                                    false,
-                                    customerAppointments
-                            )
-                    );
-                }
-            }
-
-            // Call SAP to get available slots
-            ResponseEntity<AppointmentSlotsResponseDTO> response = sapFeignClientC4c.getAvailableSlots();
-
-            if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
-                return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                        .body(new ReturnObject<>(
-                                "Failed to fetch available slots from SAP",
-                                false,
-                                null
-                        ));
-            }
-
-            AppointmentSlotsResponseDTO sapResponse = response.getBody();
-
-            return ResponseEntity.ok(
-                    new ReturnObject<>(
-                            messageUtil.getMessage("loaded.successfully"),
-                            true,
-                            sapResponse
-                    )
-            );
-
-        } catch (Exception ex) {
-            ex.printStackTrace();
-
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ReturnObject<>(
-                            "Unexpected error while fetching appointments: " + ex.getMessage(),
-                            false,
-                            null
-                    ));
-        }
-    }
 
     public ResponseEntity<ReturnObject<?>> getCustomerAppointment(Long customerId) {
         try {
             List<String> statuses = Arrays.asList("OPEN", "ON_CALL");
             Optional<List<Appointment>> customerAppointmentsOptional =
-                    appointmentRepository.findAllByCustomerIdAndStatusIn(customerId.intValue(),statuses);
+                    appointmentRepository.findAllByCustomerIdAndStatusIn(customerId.intValue(), statuses);
 
-            // If no list or empty list
             if (customerAppointmentsOptional.isPresent()) {
                 List<Appointment> appointmentList = customerAppointmentsOptional.get();
+
                 if (appointmentList.isEmpty()) {
                     return ResponseEntity.ok(
                             new ReturnObject<>(
@@ -278,14 +170,9 @@ public class CustomerAppointmentService {
                     );
                 }
 
-                List<Appointment> customerAppointments = customerAppointmentsOptional.get();
-
-                // Build list of AppointmentDto
                 List<AppointmentDto> dtoList = new ArrayList<>();
 
-                // For each appointment → fetch user name → build dto
-                for (Appointment appointment : customerAppointments) {
-
+                for (Appointment appointment : appointmentList) {
                     ResponseEntity<ReturnObject<UserProfileResponseDTO>> userResponse =
                             userFeignClient.getUserProfile((long) appointment.getUserId());
 
@@ -309,6 +196,7 @@ public class CustomerAppointmentService {
                         )
                 );
             }
+
             return ResponseEntity.ok(
                     new ReturnObject<>(
                             messageUtil.getMessage("No appointments found for this customer"),
@@ -316,6 +204,7 @@ public class CustomerAppointmentService {
                             List.of()
                     )
             );
+
         } catch (Exception ex) {
             ex.printStackTrace();
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -327,65 +216,34 @@ public class CustomerAppointmentService {
         }
     }
 
-    public ResponseEntity<?> rescheduleAppointment(Long customerId, RescheduleAppointmentRequestDTO
-            rescheduleAppointmentRequestDTO) {
+
+    public ResponseEntity<?> rescheduleAppointment(Long customerId, RescheduleAppointmentRequestDTO rescheduleAppointmentRequestDTO) {
+
         if (rescheduleAppointmentRequestDTO.getSchedule() == null) {
             ReturnObject error = new ReturnObject();
             error.setStatus(false);
             error.setMessage("Need to Add Date for Appointment");
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
         }
+
         try {
             System.out.println("customerId: " + customerId);
-
-            System.out.println("---- [Update Appointment] START ----" + customerId);
-
-            // Call Customer Microservice securely
-            ResponseEntity<ReturnObject<ProfileResponseDTO>> customerResponse =
-                    customerFeignClient.getCustomerProfile(customerId);
-
-            if (!customerResponse.getStatusCode().is2xxSuccessful() || customerResponse.getBody().getData() == null) {
-                throw new RuntimeException("Failed to fetch customer info from Customer Service");
-            }
-
-            ProfileResponseDTO customerProfile = customerResponse.getBody().getData();
-            rescheduleAppointmentRequestDTO.setSapPartnerId(customerProfile.getSapPartnerId());
             System.out.println("---- [Update Appointment] START ----" + customerId);
             System.out.println("Incoming Request: " + rescheduleAppointmentRequestDTO);
 
-            // 1️⃣ Create Appointment entity
-            Optional<Appointment> appointment = appointmentRepository.findById(rescheduleAppointmentRequestDTO.getAppointmentId());
+            // 1️⃣ Fetch and update appointment
+            Optional<Appointment> appointment =
+                    appointmentRepository.findById(rescheduleAppointmentRequestDTO.getAppointmentId());
+
             appointment.get().setCustomerId(customerId);
             appointment.get().setAppointmentDate(Timestamp.valueOf(rescheduleAppointmentRequestDTO.getSchedule()));
             appointment.get().setType("RESCHEDULE");
-//            appointment.get().setStatus("RESCHEDULE");
 
-            // 2️⃣ Call SAP Feign Client
-            try {
-                ResponseEntity<RescheduleAppointmentSapResponse> response =
-                        sapFeignClientC4c.customerRescheduleAppointment(rescheduleAppointmentRequestDTO);
-
-                System.out.println("C4C Response Status: " + response.getStatusCode());
-                System.out.println("C4C Response Body: " + response.getBody());
-
-                RescheduleAppointmentSapResponse sapResponse = response.getBody();
-
-                // 3️⃣ Handle SAP response
-                if (response.getStatusCode().is2xxSuccessful() && sapResponse != null) {
-                    appointment.get().setC4CId(sapResponse.getAppointmentId());
-                    System.out.println("Appointment updated in SAP with ID: " + sapResponse.getAppointmentId());
-                } else {
-                    appointment.get().setC4CId("FAIL");
-                    System.out.println("⚠️ SAP appointment update failed or returned null.");
-                }
-            } catch (Exception exception) {
-                System.out.println("Failed to Reschedule in C4C");
-            }
-            // 4️⃣ Save locally
+            // 2️⃣ Save locally
             appointmentRepository.save(appointment.get());
             System.out.println("Appointment saved in local DB with ID: " + appointment.get().getId());
 
-            // 5️⃣ Prepare return object
+            // 3️⃣ Prepare return object
             ReturnObject returnObject = new ReturnObject();
             returnObject.setStatus(true);
             returnObject.setData(appointment.get());
@@ -395,21 +253,25 @@ public class CustomerAppointmentService {
             return ResponseEntity.status(HttpStatus.CREATED).body(returnObject);
 
         } catch (Exception e) {
-            System.out.println("❌ Exception during appointment creation: " + e.getMessage());
+            System.out.println("❌ Exception during appointment reschedule: " + e.getMessage());
             e.printStackTrace();
 
             ReturnObject error = new ReturnObject();
             error.setStatus(false);
-            error.setMessage("Failed to create appointment: " + e.getMessage());
+            error.setMessage("Failed to reschedule appointment: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
         }
     }
 
-    public ResponseEntity<ReturnObject<?>> cancelCustomerAppointment(Integer customerId, CancelAppointmentDTO
-            cancelAppointmentDTO) {
+
+    public ResponseEntity<ReturnObject<?>> cancelCustomerAppointment(Integer customerId, CancelAppointmentDTO cancelAppointmentDTO) {
 
         Optional<Appointment> optAppointment =
-                appointmentRepository.getAppointmentByCustomerIdAndIdAndStatus(customerId, cancelAppointmentDTO.getAppId(), "OPEN");
+                appointmentRepository.getAppointmentByCustomerIdAndIdAndStatus(
+                        customerId,
+                        cancelAppointmentDTO.getAppId(),
+                        "OPEN"
+                );
 
         if (optAppointment.isEmpty()) {
             return ResponseEntity.ok(
@@ -422,29 +284,6 @@ public class CustomerAppointmentService {
         }
 
         Appointment appointment = optAppointment.get();
-        String c4cId = appointment.getC4CId();
-
-        // Call SAP only when C4CId is valid
-        boolean shouldCallSap =
-                c4cId != null &&
-                        !c4cId.equalsIgnoreCase("FAIL") &&
-                        !c4cId.equalsIgnoreCase("SAP_EXCEPTION");
-
-        if (shouldCallSap) {
-            try {
-                C4cCancelAppointmentDto c4cCancelAppointmentDto = new C4cCancelAppointmentDto();
-
-                c4cCancelAppointmentDto.setAppId(c4cId);
-                c4cCancelAppointmentDto.setNote("I dont need this appointment");
-                c4cCancelAppointmentDto.setReasonCode("121");
-
-                sapFeignClientC4c.userCancelAppointment(c4cCancelAppointmentDto);
-            } catch (Exception ex) {
-                System.out.println("SAP Appointment Cancel Error for C4CId " + c4cId + ex.getMessage());
-            }
-        }
-
-        // update status regardless of SAP result
         appointment.setStatus("CANCELED");
         appointmentRepository.save(appointment);
 
@@ -466,28 +305,34 @@ public class CustomerAppointmentService {
                         a.getZoomMeetingId()
                 ));
     }
+
     public ReturnObject<HasAppointmentInfoDTO> getAppointmentByCustomerId(Long customerId) {
-        Optional<Appointment> appointmentOptional = appointmentRepository.findTopByCustomerIdAndStartTimeIsNotNullOrderByStartTimeDesc(customerId);
+        Optional<Appointment> appointmentOptional =
+                appointmentRepository.findTopByCustomerIdAndStartTimeIsNotNullOrderByStartTimeDesc(customerId);
+
         ReturnObject returnObject = new ReturnObject();
-        if(appointmentOptional.isEmpty()){
+
+        if (appointmentOptional.isEmpty()) {
             returnObject.setMessage("No Appointment Found");
             returnObject.setData(false);
             returnObject.setStatus(false);
             return returnObject;
         }
+
         Appointment appointment = appointmentOptional.get();
         HasAppointmentInfoDTO hasAppointmentInfoDTO = new HasAppointmentInfoDTO();
         hasAppointmentInfoDTO.setAppointmentId(appointment.getId());
-        if(Objects.equals(appointment.getStatus(), "ON_CALL")){
+
+        if (Objects.equals(appointment.getStatus(), "ON_CALL")) {
             hasAppointmentInfoDTO.setHasAppointment(true);
-        }else if (Objects.equals(appointment.getStatus(),"CLOSED") &&
-                (appointment.getRate1() == null)){
+        } else if (Objects.equals(appointment.getStatus(), "CLOSED") && appointment.getRate1() == null) {
             hasAppointmentInfoDTO.setIsRateEmpty(true);
             hasAppointmentInfoDTO.setHasAppointment(false);
-        }else{
+        } else {
             hasAppointmentInfoDTO.setHasAppointment(false);
             hasAppointmentInfoDTO.setIsRateEmpty(false);
         }
+
         returnObject.setStatus(true);
         returnObject.setData(hasAppointmentInfoDTO);
         returnObject.setMessage("Appointment Returned Successfully");
@@ -533,9 +378,7 @@ public class CustomerAppointmentService {
     }
 
     public ReturnObject<Boolean> isCustomerOnCall(Integer customerId) {
-
-        boolean onCall = appointmentRepository
-                .existsByCustomerIdAndStatus(customerId, "ON_CALL");
+        boolean onCall = appointmentRepository.existsByCustomerIdAndStatus(customerId, "ON_CALL");
 
         if (!onCall) {
             return new ReturnObject<>("Customer is not on call", false, null);
@@ -548,9 +391,10 @@ public class CustomerAppointmentService {
         Appointment lastAppointment = appointmentRepository
                 .findTopByCustomerIdAndStartTimeIsNotNullOrderByStartTimeDesc(customerId)
                 .orElse(null);
-        ReturnObject returnObject = new ReturnObject();
-        if(lastAppointment!=null) {
 
+        ReturnObject returnObject = new ReturnObject();
+
+        if (lastAppointment != null) {
             lastAppointment.setRate1(rateDto.getRate1());
             lastAppointment.setRate2(rateDto.getRate2());
             lastAppointment.setRate3(rateDto.getRate3());
@@ -563,12 +407,11 @@ public class CustomerAppointmentService {
             returnObject.setMessage("Submitted Successfully");
 
             return ResponseEntity.status(HttpStatus.OK).body(returnObject);
-        }else{
+        } else {
             returnObject.setStatus(false);
             returnObject.setData(null);
             returnObject.setMessage("No Appointment Found");
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(returnObject);
-
         }
     }
 
@@ -626,26 +469,19 @@ public class CustomerAppointmentService {
     }
 
     private void sendOtpSms(String mobile, String otp) {
-
         SingleSMSRequestDTO dto = new SingleSMSRequestDTO();
         dto.setMobile(mobile);
         dto.setContent("Your OTP is: " + otp);
-
         communicationFeignClient.sendSingleSms(dto);
     }
 
     private void sendOtpEmail(String email, String otp) {
-
         UserOtpMailDTO dto = new UserOtpMailDTO();
         dto.setEmail(email);
         dto.setMailSubject("Appointment OTP Verification");
-        dto.setMailContent(
-                "<p>Your OTP is <b>" + otp + "</b></p>"
-        );
-
+        dto.setMailContent("<p>Your OTP is <b>" + otp + "</b></p>");
         communicationFeignClient.sendMail(dto);
     }
-
 
     public ReturnObject<Boolean> verifyOtp(Integer customerId, String otp) {
         ReturnObject<Boolean> returnObject = new ReturnObject<>();
@@ -668,7 +504,6 @@ public class CustomerAppointmentService {
                 return returnObject;
             }
 
-            // 3️⃣ Check match
             if (!recentOtp.getOtp().equals(otp)) {
                 returnObject.setStatus(false);
                 returnObject.setMessage("OTP is incorrect");
@@ -692,7 +527,4 @@ public class CustomerAppointmentService {
             return returnObject;
         }
     }
-
-
 }
-

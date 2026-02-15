@@ -8,8 +8,6 @@ import java.time.LocalDateTime;
 public class RescheduleAppointmentRequestDTO {
     private LocalDateTime schedule;
     private Integer appointmentId;
-    private String sapPartnerId;
-
 }
 
 

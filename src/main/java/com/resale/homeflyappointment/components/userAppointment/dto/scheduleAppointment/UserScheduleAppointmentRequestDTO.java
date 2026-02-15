@@ -10,8 +10,6 @@ import java.time.LocalDateTime;
 public class UserScheduleAppointmentRequestDTO {
     @JsonDeserialize(using = FlexibleLocalDateTimeDeserializer.class)
     private LocalDateTime schedule;
-    private String userC4cId;
-    private String customerSapPartnerId;
     private Long mobile;
     private String countryCode;
 }

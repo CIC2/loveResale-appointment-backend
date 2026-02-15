@@ -34,11 +34,6 @@ public class CustomerAppointmentController {
     }
 
 
-    @GetMapping("availableAppointments")
-    @LogActivity(ActionType.CUSTOMER_AVAILABLE_APPOINTMENTS)
-    public ResponseEntity<?> availableAppointments(@CurrentCustomerId Long customerId) {
-        return customerAppointmentService.findAvailableAppointments(customerId);
-    }
 
 
     @GetMapping("")

@@ -6,12 +6,10 @@ import com.resale.homeflyappointment.components.customerAppointment.dto.ZoomInfo
 import com.resale.homeflyappointment.components.teamLeadAppointment.dto.CustomerBasicInfoDTO;
 import com.resale.homeflyappointment.components.userAppointment.dto.ModelProjectDTO;
 import com.resale.homeflyappointment.components.userAppointment.dto.UserAppointmentDto;
-import com.resale.homeflyappointment.components.userAppointment.dto.cancelAppointment.C4cCancelAppointmentDto;
 import com.resale.homeflyappointment.components.userAppointment.dto.cancelAppointment.CancelAppointmentDTO;
 import com.resale.homeflyappointment.components.userAppointment.dto.CreateZoomMeetingRequestDTO;
 import com.resale.homeflyappointment.components.userAppointment.dto.rescheduleAppointment.UserRescheduleAppointmentRequestDTO;
 import com.resale.homeflyappointment.components.userAppointment.dto.scheduleAppointment.UserScheduleAppointmentRequestDTO;
-import com.resale.homeflyappointment.components.userAppointment.dto.scheduleAppointment.UserScheduleAppointmentSapResponse;
 import com.resale.homeflyappointment.components.userAppointment.dto.UserProfileResponseDTO;
 import com.resale.homeflyappointment.feign.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,8 +36,6 @@ import java.util.stream.Collectors;
 @Slf4j
 public class UserAppointmentService {
 
-
-    private final SAPFeignClientC4c sapFeignClientC4c;
     private final CustomerFeignClient customerFeignClient;
     private final UserFeignClient userFeignClient;
     private final AppointmentRepository appointmentRepository;
@@ -49,14 +45,14 @@ public class UserAppointmentService {
     private final ObjectMapper objectMapper;
     private final InventoryFeignClient inventoryFeignClient;
 
-    public UserAppointmentService(SAPFeignClientC4c sapFeignClientC4c,
-                                  CustomerFeignClient customerFeignClient,
+    public UserAppointmentService(CustomerFeignClient customerFeignClient,
                                   UserFeignClient userFeignClient,
                                   AppointmentRepository appointmentRepository,
                                   MessageUtil messageUtil,
-                                  CustomerValidationService customerValidationService, CommunicationFeignClient communicationFeignClient, ObjectMapper objectMapper,
+                                  CustomerValidationService customerValidationService,
+                                  CommunicationFeignClient communicationFeignClient,
+                                  ObjectMapper objectMapper,
                                   InventoryFeignClient inventoryFeignClient) {
-        this.sapFeignClientC4c = sapFeignClientC4c;
         this.customerFeignClient = customerFeignClient;
         this.userFeignClient = userFeignClient;
         this.appointmentRepository = appointmentRepository;
@@ -74,34 +70,11 @@ public class UserAppointmentService {
         System.out.println("Incoming userId: " + userId);
         System.out.println("Incoming mobile: " + scheduleAppointmentRequestDTO.getMobile());
 
-        String userC4cId = null;
         Long customerId = null;
         ProfileResponseDTO customerProfile = null;
 
         // ---------------------------------------------------------
-        // 1️⃣ Fetch User Details (Safe)
-        // ---------------------------------------------------------
-        try {
-            ResponseEntity<ReturnObject<UserProfileResponseDTO>> userResponse =
-                    userFeignClient.getUserProfile(Long.valueOf(userId));
-
-            if (userResponse.getStatusCode().is2xxSuccessful() &&
-                    userResponse.getBody() != null &&
-                    userResponse.getBody().getData() != null) {
-
-                userC4cId = userResponse.getBody().getData().getC4cId();
-                System.out.println("User C4C ID: " + userC4cId);
-
-            } else {
-                System.out.println("⚠️ Failed to fetch user details. Continuing without C4C ID.");
-            }
-
-        } catch (Exception ex) {
-            System.out.println("❌ Error calling User Microservice: " + ex.getMessage());
-        }
-
-        // ---------------------------------------------------------
-        // 2️⃣ Fetch Customer Details by Mobile (Safe)
+        // 1️⃣ Fetch Customer Details by Mobile
         // ---------------------------------------------------------
         try {
             ResponseEntity<ReturnObject<ProfileResponseDTO>> customerResponse =
@@ -126,15 +99,16 @@ public class UserAppointmentService {
         } catch (Exception ex) {
             System.out.println("❌ Error calling Customer Microservice: " + ex.getMessage());
         }
+
         if (customerId == null) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
                     new ReturnObject<>("Customer not found", false, null)
             );
         }
+
         Optional<List<Appointment>> customerAppointmentsOptional =
                 appointmentRepository.findAllByCustomerIdAndStatus(customerId, "OPEN");
 
-        // If customer already has appointments, return them
         if (customerAppointmentsOptional.isPresent()) {
             List<Appointment> appointmentList = customerAppointmentsOptional.get();
             if (!appointmentList.isEmpty()) {
@@ -145,13 +119,11 @@ public class UserAppointmentService {
         }
 
         // ---------------------------------------------------------
-        // 3️⃣ Create Appointment Locally (Always)
+        // 2️⃣ Create Appointment Locally
         // ---------------------------------------------------------
         Appointment newApp = new Appointment();
         newApp.setUserId(userId);
         newApp.setStatus("OPEN");
-
-        // Even if customerId is null → allow it (DB must allow nullable column)
         newApp.setCustomerId(customerId);
 
         try {
@@ -163,69 +135,33 @@ public class UserAppointmentService {
         newApp.setType("SALES SCHEDULE");
 
         // ---------------------------------------------------------
-        // Set SAP Fields If Available
-        // ---------------------------------------------------------
-        if (customerProfile != null) {
-            scheduleAppointmentRequestDTO.setCustomerSapPartnerId(customerProfile.getSapPartnerId());
-            scheduleAppointmentRequestDTO.setCountryCode(customerProfile.getCountryCode());
-        }
-
-        if (userC4cId != null) {
-            scheduleAppointmentRequestDTO.setUserC4cId(userC4cId);
-        }
-
-        // ---------------------------------------------------------
-        // 4️⃣ Call SAP (Safe – does NOT block local saving)
+        // 3️⃣ Save Appointment Locally
         // ---------------------------------------------------------
         try {
-            ResponseEntity<UserScheduleAppointmentSapResponse> sapResponse =
-                    sapFeignClientC4c.userScheduleAppointment(scheduleAppointmentRequestDTO);
-
-            System.out.println("SAP Status: " + sapResponse.getStatusCode());
-            System.out.println("SAP Body: " + sapResponse.getBody());
-
-            if (sapResponse.getStatusCode().is2xxSuccessful() && sapResponse.getBody() != null) {
-                newApp.setC4CId(sapResponse.getBody().getAppointmentId());
-                System.out.println("SAP appointment created: " + sapResponse.getBody().getAppointmentId());
-            } else {
-                newApp.setC4CId("SAP_FAIL");
-                System.out.println("⚠️ SAP returned non-200. Saved with C4CId = SAP_FAIL");
-            }
-
-        } catch (Exception ex) {
-            newApp.setC4CId("SAP_EXCEPTION");
-            System.out.println("❌ SAP Error: " + ex.getMessage());
-        }
-
-        // ---------------------------------------------------------
-        // 5️⃣ Save Appointment Locally (Always)
-        // ---------------------------------------------------------
-        try {
-
             appointmentRepository.save(newApp);
             System.out.println("Local appointment saved ID = " + newApp.getId());
         } catch (Exception ex) {
             System.out.println("❌ Failed to save appointment locally: " + ex.getMessage());
-            ReturnObject err = new ReturnObject("Failed locally: " + ex.getMessage(), false, null);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(err);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new ReturnObject<>("Failed locally: " + ex.getMessage(), false, null)
+            );
         }
 
         // ---------------------------------------------------------
-        // 6️⃣ Final Response
+        // 4️⃣ Final Response
         // ---------------------------------------------------------
-        ReturnObject successResponse = new ReturnObject(
-                messageUtil.getMessage("appointment.created.successfully"),
-                true,
-                newApp
-        );
-
         System.out.println("---- [Create Appointment] END SUCCESS ----");
 
-        return ResponseEntity.status(HttpStatus.CREATED).body(successResponse);
+        return ResponseEntity.status(HttpStatus.CREATED).body(
+                new ReturnObject<>(
+                        messageUtil.getMessage("appointment.created.successfully"),
+                        true,
+                        newApp
+                )
+        );
     }
 
 
-    //I want to enhance this and the code upove is for schedule appointment
     public ResponseEntity<?> rescheduleUserAppointment(Integer userId, UserRescheduleAppointmentRequestDTO req) {
 
         System.out.println("---- [Reschedule Appointment] START ----");
@@ -255,38 +191,9 @@ public class UserAppointmentService {
         }
 
         Appointment oldAppointment = optAppointment.get();
-        String c4cId = oldAppointment.getC4CId();
 
         // ---------------------------------------------------------
-        // 2️⃣ Determine if SAP Call Should be Performed
-        // ---------------------------------------------------------
-        boolean shouldCallSap =
-                c4cId != null &&
-                        !c4cId.equalsIgnoreCase("FAIL") &&
-                        !c4cId.equalsIgnoreCase("SAP_EXCEPTION");
-
-        if (shouldCallSap) {
-            System.out.println("Calling SAP to cancel/modify existing appointment...");
-            try {
-                C4cCancelAppointmentDto dto = new C4cCancelAppointmentDto();
-                dto.setAppId(c4cId);
-                dto.setNote(req.getNote());
-                dto.setReasonCode(req.getReasonCode());
-
-                // TODO -> Replace with SAP reschedule call when implemented
-                // sapFeignClientC4c.userCancelAppointment(dto);
-
-                System.out.println("SAP reschedule/cancel completed successfully for C4CId: " + c4cId);
-
-            } catch (Exception ex) {
-                System.out.println("❌ SAP Reschedule Error for C4CId " + c4cId + " | " + ex.getMessage());
-            }
-        } else {
-            System.out.println("Skipping SAP call: C4CId not valid (" + c4cId + ")");
-        }
-
-        // ---------------------------------------------------------
-        // 3️⃣ Close Old Appointment (Always)
+        // 2️⃣ Close Old Appointment
         // ---------------------------------------------------------
         oldAppointment.setStatus("RESCHEDULED");
 
@@ -298,7 +205,7 @@ public class UserAppointmentService {
         }
 
         // ---------------------------------------------------------
-        // 4️⃣ Create New Appointment (Always)
+        // 3️⃣ Create New Appointment
         // ---------------------------------------------------------
         Appointment newAppointment = new Appointment();
         newAppointment.setUserId(oldAppointment.getUserId());
@@ -312,12 +219,8 @@ public class UserAppointmentService {
             System.out.println("⚠️ Invalid date in request: " + ex.getMessage());
         }
 
-        // C4CId is not known yet → Set fallback
-        //newAppointment.setC4CId("RESCHEDULE_PENDING");
-        newAppointment.setC4CId(oldAppointment.getC4CId());
-
         // ---------------------------------------------------------
-        // 5️⃣ Save New Appointment Locally (Always)
+        // 4️⃣ Save New Appointment Locally
         // ---------------------------------------------------------
         try {
             appointmentRepository.save(newAppointment);
@@ -330,7 +233,7 @@ public class UserAppointmentService {
         }
 
         // ---------------------------------------------------------
-        // 6️⃣ Final Response
+        // 5️⃣ Final Response
         // ---------------------------------------------------------
         System.out.println("---- [Reschedule Appointment] END SUCCESS ----");
 
@@ -342,6 +245,7 @@ public class UserAppointmentService {
                 )
         );
     }
+
 
     public ResponseEntity<ReturnObject<PaginatedResponseDTO<UserAppointmentDto>>> getUserAppointment(
             Long userId,
@@ -355,15 +259,12 @@ public class UserAppointmentService {
             List<Appointment> userAppointments =
                     appointmentRepository.findAllByUserId(userId.intValue());
 
-            // Filter only OPEN appointments
             userAppointments = userAppointments.stream()
                     .filter(app -> "OPEN".equalsIgnoreCase(app.getStatus()))
                     .collect(Collectors.toList());
 
-            // Convert mobile to string
             String mobileStringValue = mobile != null ? mobile.toString() : null;
 
-            // If no appointments found
             if (userAppointments.isEmpty()) {
                 PaginatedResponseDTO<UserAppointmentDto> emptyPage = new PaginatedResponseDTO<>(
                         Collections.emptyList(), 0, pageable.getPageSize(), 0, 0, true
@@ -371,7 +272,6 @@ public class UserAppointmentService {
                 return ResponseEntity.ok(new ReturnObject<>("No appointments found", false, emptyPage));
             }
 
-            // Extract unique customer IDs
             List<Long> customerIds = userAppointments.stream()
                     .map(Appointment::getCustomerId)
                     .filter(Objects::nonNull)
@@ -380,7 +280,6 @@ public class UserAppointmentService {
 
             System.out.println("Unique Customer IDs: " + customerIds);
 
-            // Fetch customer profiles
             Map<Long, ProfileResponseDTO> customerMap = new HashMap<>();
             if (!customerIds.isEmpty()) {
                 ResponseEntity<ReturnObject<List<ProfileResponseDTO>>> customerResponse =
@@ -397,22 +296,17 @@ public class UserAppointmentService {
 
             final Map<Long, ProfileResponseDTO> finalCustomerMap = customerMap;
 
-            // Convert from string to LocalDateTime
             LocalDateTime from = fromDate != null ? LocalDateTime.parse(fromDate) : null;
             LocalDateTime to = toDate != null ? LocalDateTime.parse(toDate) : null;
 
-            // Build appointment DTO list + date filtering
             List<UserAppointmentDto> appointmentDtos = userAppointments.stream()
                     .filter(app -> finalCustomerMap.containsKey(app.getCustomerId()))
                     .filter(app -> {
                         LocalDateTime appDate = app.getAppointmentDate().toLocalDateTime();
-
                         if (from != null && appDate.isBefore(from)) return false;
                         if (to != null && appDate.isAfter(to)) return false;
-
                         return true;
                     })
-
                     .map(app -> {
                         ProfileResponseDTO customer = finalCustomerMap.get(app.getCustomerId());
                         return new UserAppointmentDto(
@@ -427,7 +321,6 @@ public class UserAppointmentService {
                     })
                     .collect(Collectors.toList());
 
-            // Apply pagination manually (because we already built a list)
             int start = (int) pageable.getOffset();
             int end = Math.min((start + pageable.getPageSize()), appointmentDtos.size());
             List<UserAppointmentDto> pagedList = start >= end ? Collections.emptyList() : appointmentDtos.subList(start, end);
@@ -464,7 +357,11 @@ public class UserAppointmentService {
     public ResponseEntity<ReturnObject<?>> cancelUserAppointment(Integer userId, CancelAppointmentDTO cancelAppointmentDTO) {
 
         Optional<Appointment> optAppointment =
-                appointmentRepository.getAppointmentByUserIdAndIdAndStatus(userId, Integer.valueOf(cancelAppointmentDTO.getAppId()), "OPEN");
+                appointmentRepository.getAppointmentByUserIdAndIdAndStatus(
+                        userId,
+                        Integer.valueOf(cancelAppointmentDTO.getAppId()),
+                        "OPEN"
+                );
 
         if (optAppointment.isEmpty()) {
             return ResponseEntity.ok(
@@ -476,32 +373,7 @@ public class UserAppointmentService {
             );
         }
 
-
         Appointment appointment = optAppointment.get();
-
-        String c4cId = appointment.getC4CId();
-
-        // Call SAP only when C4CId is valid
-        boolean shouldCallSap =
-                c4cId != null &&
-                        !c4cId.equalsIgnoreCase("FAIL") &&
-                        !c4cId.equalsIgnoreCase("SAP_EXCEPTION");
-
-        if (shouldCallSap) {
-            try {
-                C4cCancelAppointmentDto c4cCancelAppointmentDto = new C4cCancelAppointmentDto();
-
-                c4cCancelAppointmentDto.setAppId(c4cId);
-                c4cCancelAppointmentDto.setNote(cancelAppointmentDTO.getNote());
-                c4cCancelAppointmentDto.setReasonCode(cancelAppointmentDTO.getReasonCode());
-
-                sapFeignClientC4c.userCancelAppointment(c4cCancelAppointmentDto);
-            } catch (Exception ex) {
-                System.out.println("SAP Appointment Cancel Error for C4CId " + c4cId + ex.getMessage());
-            }
-        }
-
-        // update status regardless of SAP result
         appointment.setStatus("CANCELED");
         appointmentRepository.save(appointment);
 
@@ -513,6 +385,7 @@ public class UserAppointmentService {
                 )
         );
     }
+
 
     @Transactional
     public ResponseEntity<ReturnObject<?>> changeStatusUserAppointment(
@@ -535,7 +408,6 @@ public class UserAppointmentService {
         Appointment appointment = optionalAppointment.get();
         String oldStatus = appointment.getStatus();
 
-        // Only proceed if appointment is OPEN and Zoom meeting not already created
         if (!"OPEN".equals(oldStatus) || appointment.getZoomMeetingId() != null) {
             return ResponseEntity.badRequest()
                     .body(new ReturnObject<>(
@@ -546,7 +418,6 @@ public class UserAppointmentService {
                     ));
         }
 
-        // Ensure salesman has no other ON_CALL appointment
         boolean alreadyOnCall =
                 appointmentRepository.existsByUserIdAndStatusAndIdNot(
                         userId,
@@ -563,16 +434,6 @@ public class UserAppointmentService {
                     ));
         }
 
-        // Keep original Zoom host retrieval commented
-//    ResponseEntity<ReturnObject<String>> userResponse = userFeignClient.getZoomIdForUser(userId.intValue());
-//
-//    if (!userResponse.getStatusCode().is2xxSuccessful() || !userResponse.getBody().getStatus()) {
-//        return ResponseEntity.status(userResponse.getStatusCode())
-//                .body(new ReturnObject<>("Failed to retrieve Zoom Host ID: " + userResponse.getBody().getMessage(), false, null));
-//    }
-//
-//    String zoomHostId = userResponse.getBody().getData();
-
         boolean salesmanOnCall =
                 appointmentRepository.existsByUserIdAndStatus(appointment.getUserId(), "ON_CALL");
 
@@ -581,14 +442,11 @@ public class UserAppointmentService {
                     .body(new ReturnObject<>("Salesman is already on another call", false, null));
         }
 
-        String zoomHostId = "me"; // placeholder
-
-        // Create Zoom meeting
         CreateZoomMeetingRequestDTO req = new CreateZoomMeetingRequestDTO();
         req.setTopic("Sales Appointment");
         req.setStart_time(appointment.getAppointmentDate().toInstant().toString());
         req.setDuration(120);
-        req.setZoomHostId(zoomHostId);
+        req.setZoomHostId("me");
 
         ResponseEntity<ReturnObject<?>> zoomResponse =
                 communicationFeignClient.createZoomMeeting(req);
@@ -605,7 +463,6 @@ public class UserAppointmentService {
                     ));
         }
 
-        // Save Zoom info
         ReturnObject<?> body = zoomResponse.getBody();
         if (body.getData() instanceof Map<?, ?> zoomData) {
             appointment.setZoomMeetingId(String.valueOf(zoomData.get("meetingId")));
@@ -613,7 +470,6 @@ public class UserAppointmentService {
             appointment.setZoomStartUrl((String) zoomData.get("startUrl"));
         }
 
-        // Update status and save
         appointment.setStatus("ON_CALL");
         appointment.setStartTime(Timestamp.valueOf(LocalDateTime.now()));
         appointmentRepository.save(appointment);
@@ -649,6 +505,7 @@ public class UserAppointmentService {
 
         ResponseEntity<ReturnObject<List<ProfileResponseDTO>>> customerResponse =
                 customerFeignClient.getCustomersByIds(customerIds, null, null);
+
         ZoomInfoDTO zoomInfoDTO = null;
         if (customerResponse != null &&
                 customerResponse.getBody() != null &&
@@ -680,6 +537,7 @@ public class UserAppointmentService {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN).body(returnObject);
             }
         }
+
         returnObject.setMessage("Failed to Send :");
         returnObject.setData(null);
         returnObject.setStatus(false);
@@ -691,9 +549,7 @@ public class UserAppointmentService {
     public ReturnObject<ObjectNode> getZoomDataByUser(Integer userId) {
 
         Optional<Appointment> appointmentOptional =
-                appointmentRepository.findByUserIdAndStatusIgnoreCase(
-                        userId, "ON_CALL"
-                );
+                appointmentRepository.findByUserIdAndStatusIgnoreCase(userId, "ON_CALL");
 
         if (appointmentOptional.isEmpty()) {
             return new ReturnObject<>(
@@ -714,9 +570,7 @@ public class UserAppointmentService {
         }
 
         ResponseEntity<ReturnObject<ObjectNode>> zoomResponse =
-                communicationFeignClient.getZoomRuntimeData(
-                        appointment.getZoomMeetingId()
-                );
+                communicationFeignClient.getZoomRuntimeData(appointment.getZoomMeetingId());
 
         if (!zoomResponse.getStatusCode().is2xxSuccessful()
                 || zoomResponse.getBody() == null
@@ -746,9 +600,9 @@ public class UserAppointmentService {
                 customerName = customerResponse.getBody().getData().getFullName();
             }
         } catch (Exception ex) {
-            log.warn("Failed to retrieve customer name for customerId={}",
-                    appointment.getCustomerId(), ex);
+            log.warn("Failed to retrieve customer name for customerId={}", appointment.getCustomerId(), ex);
         }
+
         data.put("customerName", customerName);
         data.put("startUrl", appointment.getZoomStartUrl());
         data.remove("joinUrl");
@@ -778,7 +632,7 @@ public class UserAppointmentService {
         } catch (Exception ex) {
             log.warn("Failed to retrieve model/project info for modelId={}", appointment.getModelId(), ex);
             data.put("modelName", "N/A");
-            data.put("model Code", "N/A");
+            data.put("modelCode", "N/A");
             data.put("projectId", "N/A");
             data.put("projectName", "N/A");
             data.put("modelId", appointment.getModelId());
@@ -791,4 +645,3 @@ public class UserAppointmentService {
         );
     }
 }
-
