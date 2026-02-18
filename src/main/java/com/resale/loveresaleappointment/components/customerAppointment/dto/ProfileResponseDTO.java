@@ -1,0 +1,14 @@
+package com.resale.loveresaleappointment.components.customerAppointment.dto;
+
+import lombok.Data;
+
+@Data
+public class ProfileResponseDTO {
+    private Long customerId;
+    private String fullName;
+    private String mobile;
+    private String countryCode;
+    private String fcmToken;
+}
+
+
