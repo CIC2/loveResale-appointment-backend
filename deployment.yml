@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: resale-appointment-app
+  namespace: dev-resale
 spec:
   replicas: 1
   selector:
@@ -12,34 +13,43 @@ spec:
       labels:
         app: resale-appointment-app
     spec:
+      # Allow pulling from IBM Container Registry
+      imagePullSecrets:
+        - name: icr-secret
       containers:
         - name: resale-appointment-app
           image: de.icr.io/dev-registry/loveresale-appointment-backend:latest
           args:
             - --spring.application.json=$(BINDING)
+
           env:
             - name: BINDING
               valueFrom:
                 configMapKeyRef:
                   name: backend-properties
                   key: application-properties
+
             - name: DB_CONNECTION
               valueFrom:
                 configMapKeyRef:
                   name: backend-properties
                   key: DB_CONNECTION
+
             - name: DB_USERNAME
               valueFrom:
                 configMapKeyRef:
                   name: backend-properties
                   key: DB_USERNAME
+
             - name: DB_PASSWORD
               valueFrom:
                 configMapKeyRef:
                   name: backend-properties
                   key: DB_PASSWORD
+
           ports:
             - containerPort: 8025
+
           resources:
             requests:
               cpu: 125m
@@ -49,12 +59,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: resale-appointment-service-cip
+  namespace: dev-resale
   labels:
     app: resale-appointment-app
 spec:
   type: ClusterIP
+
   ports:
     - port: 80
       targetPort: 8025
+
   selector:
     app: resale-appointment-app
